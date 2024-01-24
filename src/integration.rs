@@ -1,6 +1,10 @@
 #![warn(missing_docs)]
 
-use ash::{extensions::khr::Swapchain, vk, Device};
+use ash::{
+    extensions::khr::Swapchain,
+    vk::{self, ImageView},
+    Device,
+};
 use bytemuck::bytes_of;
 use egui::{
     epaint::{ahash::AHashMap, ImageDelta},
@@ -11,6 +15,19 @@ use raw_window_handle::HasRawDisplayHandle;
 use std::ffi::CString;
 
 use crate::{utils::insert_image_memory_barrier, *};
+
+#[derive(Copy, Clone, Debug)]
+struct DescriptorPoolInfo {
+    pool: vk::DescriptorPool,
+    max_allocations: usize,
+    current_allocations: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct DescriptorSetAllocation {
+    set: vk::DescriptorSet,
+    pool_index: usize,
+}
 
 /// egui integration with winit and ash.
 pub struct Integration<A: AllocatorTrait> {
@@ -25,7 +42,7 @@ pub struct Integration<A: AllocatorTrait> {
     qfi: u32,
     queue: vk::Queue,
     swapchain_loader: Swapchain,
-    descriptor_pool: vk::DescriptorPool,
+    descriptor_pools: Vec<DescriptorPoolInfo>,
     descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -37,14 +54,14 @@ pub struct Integration<A: AllocatorTrait> {
     vertex_buffer_allocations: Vec<A::Allocation>,
     index_buffers: Vec<vk::Buffer>,
     index_buffer_allocations: Vec<A::Allocation>,
-    texture_desc_sets: AHashMap<TextureId, vk::DescriptorSet>,
+    texture_desc_sets: AHashMap<TextureId, DescriptorSetAllocation>,
     texture_images: AHashMap<TextureId, vk::Image>,
     texture_image_infos: AHashMap<TextureId, vk::ImageCreateInfo>,
     texture_allocations: AHashMap<TextureId, A::Allocation>,
     texture_image_views: AHashMap<TextureId, vk::ImageView>,
 
     user_texture_layout: vk::DescriptorSetLayout,
-    user_textures: Vec<Option<vk::DescriptorSet>>,
+    user_textures: Vec<Option<DescriptorSetAllocation>>,
 }
 impl<A: AllocatorTrait> Integration<A> {
     /// Create an instance of the integration.
@@ -77,21 +94,6 @@ impl<A: AllocatorTrait> Integration<A> {
                 .get_swapchain_images(swapchain)
                 .expect("Failed to get swapchain images.")
         };
-
-        // Create DescriptorPool
-        let descriptor_pool = unsafe {
-            device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::builder()
-                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-                    .max_sets(1024)
-                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
-                        .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .descriptor_count(1024)
-                        .build()]),
-                None,
-            )
-        }
-        .expect("Failed to create descriptor pool.");
 
         // Create DescriptorSetLayouts
         let descriptor_set_layouts = {
@@ -473,7 +475,7 @@ impl<A: AllocatorTrait> Integration<A> {
             qfi,
             queue,
             swapchain_loader,
-            descriptor_pool,
+            descriptor_pools: vec![],
             descriptor_set_layouts,
             pipeline_layout,
             pipeline,
@@ -680,7 +682,7 @@ impl<A: AllocatorTrait> Integration<A> {
                             vk::PipelineBindPoint::GRAPHICS,
                             self.pipeline_layout,
                             0,
-                            &[descriptor_set],
+                            &[descriptor_set.set],
                             &[],
                         );
                     } else {
@@ -696,7 +698,7 @@ impl<A: AllocatorTrait> Integration<A> {
                         vk::PipelineBindPoint::GRAPHICS,
                         self.pipeline_layout,
                         0,
-                        &[*self.texture_desc_sets.get(&mesh.texture_id).unwrap()],
+                        &[self.texture_desc_sets.get(&mesh.texture_id).unwrap().set],
                         &[],
                     );
                 }
@@ -1179,24 +1181,15 @@ impl<A: AllocatorTrait> Integration<A> {
             // Otherwise save the newly created texture
 
             // update dsc set
-            let dsc_set = {
-                let dsc_alloc_info = vk::DescriptorSetAllocateInfo::builder()
-                    .descriptor_pool(self.descriptor_pool)
-                    .set_layouts(&[self.descriptor_set_layouts[0]])
-                    .build();
-                unsafe {
-                    self.device
-                        .allocate_descriptor_sets(&dsc_alloc_info)
-                        .unwrap()[0]
-                }
-            };
+            let layouts = [self.descriptor_set_layouts[0]];
+            let dsc_set = self.get_descriptor_set(&layouts);
             let image_info = vk::DescriptorImageInfo::builder()
                 .image_view(texture_image_view)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .sampler(self.sampler)
                 .build();
             let dsc_writes = [vk::WriteDescriptorSet::builder()
-                .dst_set(dsc_set)
+                .dst_set(dsc_set.set)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .dst_array_element(0_u32)
                 .dst_binding(0_u32)
@@ -1512,19 +1505,12 @@ impl<A: AllocatorTrait> Integration<A> {
 
         // allocate and update descriptor set
         let layouts = [self.user_texture_layout];
-        let descriptor_set = unsafe {
-            self.device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
-                    .descriptor_pool(self.descriptor_pool)
-                    .set_layouts(&layouts),
-            )
-        }
-        .expect("Failed to create descriptor sets.")[0];
+        let descriptor_set = self.get_descriptor_set(&layouts);
         unsafe {
             self.device.update_descriptor_sets(
                 &[vk::WriteDescriptorSet::builder()
                     .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .dst_set(descriptor_set)
+                    .dst_set(descriptor_set.set)
                     .image_info(&[vk::DescriptorImageInfo::builder()
                         .image_view(image_view)
                         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1551,11 +1537,13 @@ impl<A: AllocatorTrait> Integration<A> {
     pub fn unregister_user_texture(&mut self, texture_id: egui::TextureId) {
         if let egui::TextureId::User(id) = texture_id {
             if let Some(descriptor_set) = self.user_textures[id as usize] {
+                let pool = &mut self.descriptor_pools[descriptor_set.pool_index];
                 unsafe {
                     self.device
-                        .free_descriptor_sets(self.descriptor_pool, &[descriptor_set])
+                        .free_descriptor_sets(pool.pool, &[descriptor_set.set])
                         .expect("Failed to free descriptor sets.");
                 }
+                pool.current_allocations -= 1;
                 self.user_textures[id as usize] = None;
             }
         } else {
@@ -1607,8 +1595,10 @@ impl<A: AllocatorTrait> Integration<A> {
             self.device
                 .destroy_descriptor_set_layout(descriptor_set_layout, None);
         }
-        self.device
-            .destroy_descriptor_pool(self.descriptor_pool, None);
+
+        self.descriptor_pools.iter().for_each(|pool_info| {
+            self.device.destroy_descriptor_pool(pool_info.pool, None);
+        });
 
         for (_texture_id, texture_image) in self.texture_images.drain() {
             self.device.destroy_image(texture_image, None);
@@ -1619,5 +1609,66 @@ impl<A: AllocatorTrait> Integration<A> {
         for (_texture_id, texture_allocation) in self.texture_allocations.drain() {
             self.allocator.free(texture_allocation).unwrap();
         }
+    }
+
+    /// The max number of descriptor set allocations for each descriptor pool
+    pub const MAX_ALLOCATIONS: usize = 1024;
+
+    fn get_descriptor_pool_index(&mut self) -> usize {
+        for (i, pool_info) in self.descriptor_pools.iter().enumerate() {
+            if pool_info.current_allocations < pool_info.max_allocations {
+                return i;
+            }
+        }
+
+        let pool_idx = self.descriptor_pools.len();
+
+        // Create DescriptorPool
+        let pool = unsafe {
+            self.device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::builder()
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+                    .max_sets(Self::MAX_ALLOCATIONS as _)
+                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                        .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .descriptor_count(Self::MAX_ALLOCATIONS as _)
+                        .build()]),
+                None,
+            )
+        }
+        .expect("Failed to create descriptor pool.");
+
+        let info = DescriptorPoolInfo {
+            pool,
+            current_allocations: 0,
+            max_allocations: Self::MAX_ALLOCATIONS,
+        };
+
+        self.descriptor_pools.push(info);
+
+        pool_idx
+    }
+
+    fn get_descriptor_set(
+        &mut self,
+        layouts: &[vk::DescriptorSetLayout],
+    ) -> DescriptorSetAllocation {
+        let pool_index = self.get_descriptor_pool_index();
+        let pool_info = &mut self.descriptor_pools[pool_index];
+        let set = {
+            let dsc_alloc_info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(pool_info.pool)
+                .set_layouts(layouts)
+                .build();
+            unsafe {
+                self.device
+                    .allocate_descriptor_sets(&dsc_alloc_info)
+                    .unwrap()[0]
+            }
+        };
+
+        pool_info.current_allocations += 1;
+
+        DescriptorSetAllocation { set, pool_index }
     }
 }
