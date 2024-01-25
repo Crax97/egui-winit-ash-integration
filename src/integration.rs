@@ -1188,14 +1188,21 @@ impl<A: AllocatorTrait> Integration<A> {
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .sampler(self.sampler)
                 .build();
-            let dsc_writes = [vk::WriteDescriptorSet::builder()
+            let infos = [image_info];
+            let dsc_write = vk::WriteDescriptorSet::builder()
                 .dst_set(dsc_set.set)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .dst_array_element(0_u32)
                 .dst_binding(0_u32)
-                .image_info(&[image_info])
-                .build()];
+                .image_info(&infos)
+                .build();
+
+            let dsc_writes = [dsc_write];
             unsafe {
+                assert!(dsc_writes[0].descriptor_count == 1);
+                assert!(
+                    dsc_writes[0].p_image_info.as_ref().unwrap().image_view != ImageView::null()
+                );
                 self.device.update_descriptor_sets(&dsc_writes, &[]);
             }
             // register new texture
@@ -1637,6 +1644,8 @@ impl<A: AllocatorTrait> Integration<A> {
             )
         }
         .expect("Failed to create descriptor pool.");
+
+        println!("Create new pool");
 
         let info = DescriptorPoolInfo {
             pool,
