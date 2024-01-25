@@ -1137,226 +1137,13 @@ impl App {
             }
         }
 
-        // Load User Texture image
-        let (image, image_allocation, image_view) = {
-            let image_object = image::open(&Path::new(IMAGE_PATH))?;
-            let (image_width, image_height) = (image_object.width(), image_object.height());
-            let image_data = image_object.to_rgba8().into_raw();
-
-            let image_size =
-                (std::mem::size_of::<u8>() as u32 * image_width * image_height * 4) as u64;
-
-            // Create Staging buffer
-            let staging_buffer = unsafe {
-                device.create_buffer(
-                    &vk::BufferCreateInfo::builder()
-                        .size(image_size)
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC),
-                    None,
-                )?
-            };
-            let staging_buffer_requirements =
-                unsafe { device.get_buffer_memory_requirements(staging_buffer) };
-            let staging_buffer_allocation = allocator.allocate(&AllocationCreateDesc {
-                name: "User Texture Staging Buffer",
-                requirements: staging_buffer_requirements,
-                location: gpu_allocator::MemoryLocation::CpuToGpu,
-                linear: true,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })?;
-            unsafe {
-                device.bind_buffer_memory(
-                    staging_buffer,
-                    staging_buffer_allocation.memory(),
-                    staging_buffer_allocation.offset(),
-                )?
-            }
-            // Map staging buffer
-            unsafe {
-                let mapped_memory =
-                    staging_buffer_allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
-                mapped_memory.copy_from_nonoverlapping(image_data.as_ptr(), image_data.len());
-            }
-
-            let format = vk::Format::R8G8B8A8_UNORM;
-
-            // Create Image
-            let image = unsafe {
-                device.create_image(
-                    &vk::ImageCreateInfo::builder()
-                        .image_type(vk::ImageType::TYPE_2D)
-                        .format(format)
-                        .extent(vk::Extent3D {
-                            width: image_width,
-                            height: image_height,
-                            depth: 1,
-                        })
-                        .mip_levels(1)
-                        .array_layers(1)
-                        .samples(vk::SampleCountFlags::TYPE_1)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .initial_layout(vk::ImageLayout::UNDEFINED)
-                        .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED),
-                    None,
-                )?
-            };
-            let image_requirements = unsafe { device.get_image_memory_requirements(image) };
-            let image_allocation = allocator.allocate(&AllocationCreateDesc {
-                name: "User Texture Image",
-                requirements: image_requirements,
-                location: gpu_allocator::MemoryLocation::GpuOnly,
-                linear: false,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })?;
-            unsafe {
-                device.bind_image_memory(
-                    image,
-                    image_allocation.memory(),
-                    image_allocation.offset(),
-                )?
-            };
-
-            // Copy data from buffer to image
-            unsafe {
-                let command = device.allocate_command_buffers(
-                    &vk::CommandBufferAllocateInfo::builder()
-                        .command_pool(graphics_command_pool)
-                        .level(vk::CommandBufferLevel::PRIMARY)
-                        .command_buffer_count(1),
-                )?[0];
-
-                // Begin command
-                device.begin_command_buffer(
-                    command,
-                    &vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )?;
-
-                // Change image layout to transfer dst optimal
-                device.cmd_pipeline_barrier(
-                    command,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[vk::ImageMemoryBarrier::builder()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .image(image)
-                        .subresource_range(
-                            vk::ImageSubresourceRange::builder()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .base_mip_level(0)
-                                .level_count(1)
-                                .base_array_layer(0)
-                                .layer_count(1)
-                                .build(),
-                        )
-                        .build()],
-                );
-
-                // Copy data from buffer to image
-                device.cmd_copy_buffer_to_image(
-                    command,
-                    staging_buffer,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[vk::BufferImageCopy::builder()
-                        .image_subresource(
-                            vk::ImageSubresourceLayers::builder()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .mip_level(0)
-                                .base_array_layer(0)
-                                .layer_count(1)
-                                .build(),
-                        )
-                        .image_extent(vk::Extent3D {
-                            width: image_width,
-                            height: image_height,
-                            depth: 1,
-                        })
-                        .buffer_offset(0)
-                        .buffer_image_height(0)
-                        .buffer_row_length(0)
-                        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                        .build()],
-                );
-
-                // Change image layout to shader read only optimal
-                device.cmd_pipeline_barrier(
-                    command,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[vk::ImageMemoryBarrier::builder()
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .image(image)
-                        .subresource_range(
-                            vk::ImageSubresourceRange::builder()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .base_mip_level(0)
-                                .level_count(1)
-                                .base_array_layer(0)
-                                .layer_count(1)
-                                .build(),
-                        )
-                        .build()],
-                );
-
-                // End command
-                device.end_command_buffer(command)?;
-
-                // Submit command
-                device.queue_submit(
-                    graphics_queue,
-                    &[vk::SubmitInfo::builder()
-                        .command_buffers(&[command])
-                        .build()],
-                    vk::Fence::null(),
-                )?;
-                device.queue_wait_idle(graphics_queue)?;
-            }
-
-            // Delete staging buffer
-            allocator.free(staging_buffer_allocation)?;
-            unsafe {
-                device.destroy_buffer(staging_buffer, None);
-            }
-
-            // Create Image View
-            let image_view = unsafe {
-                device.create_image_view(
-                    &vk::ImageViewCreateInfo::builder()
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .image(image)
-                        .format(format)
-                        .components(vk::ComponentMapping {
-                            r: vk::ComponentSwizzle::IDENTITY,
-                            g: vk::ComponentSwizzle::IDENTITY,
-                            b: vk::ComponentSwizzle::IDENTITY,
-                            a: vk::ComponentSwizzle::IDENTITY,
-                        })
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }),
-                    None,
-                )?
-            };
-
-            (image, image_allocation, image_view)
-        };
+        let (image, image_allocation, image_view) = load_image_from_path(
+            &device,
+            &mut allocator,
+            graphics_command_pool,
+            graphics_queue,
+            &Path::new(IMAGE_PATH),
+        )?;
         // Create User Texture image sampler
         let sampler = unsafe {
             device.create_sampler(
@@ -1743,6 +1530,41 @@ impl App {
             self.egui_integration.begin_frame(&self.window);
             egui::SidePanel::left("my_side_panel").show(&self.egui_integration.context(), |ui| {
                 ui.heading("User Texture Example");
+                if ui.button("Load new image").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Image files", &["*.png", "*.bmp", "*.jpg", "*.jpeg"])
+                        .pick_file()
+                    {
+                        let mut allocator =
+                            self.allocator.lock().expect("Failed to lock allocator");
+                        if let Ok((image, allocation, view)) = load_image_from_path(
+                            &self.device,
+                            &mut allocator,
+                            self.graphics_command_pool,
+                            self.graphics_queue,
+                            &path,
+                        ) {
+                            self.egui_integration
+                                .unregister_user_texture(self.image_texture_id);
+
+                            self.device.destroy_image_view(self.image_view, None);
+                            self.device.destroy_image(self.image, None);
+
+                            if let Some(allocation) = self.image_allocation.take() {
+                                allocator
+                                    .free(allocation)
+                                    .expect("Failed to release allocation");
+                            }
+
+                            self.image_view = view;
+                            self.image = image;
+                            self.image_allocation = Some(allocation);
+                            self.image_texture_id = self
+                                .egui_integration
+                                .register_user_texture(view, self.sampler);
+                        }
+                    }
+                }
                 ui.separator();
                 ui.checkbox(&mut self.show_user_texture_window, "User Texture Window");
                 ui.checkbox(&mut self.show_scene_window, "Scene Window");
@@ -1991,6 +1813,229 @@ impl App {
 
         Ok(())
     }
+}
+
+fn load_image_from_path(
+    device: &Device,
+    allocator: &mut Allocator,
+    graphics_command_pool: vk::CommandPool,
+    graphics_queue: vk::Queue,
+    path: &Path,
+) -> Result<(vk::Image, Allocation, vk::ImageView), anyhow::Error> {
+    let (image, image_allocation, image_view) = {
+        let image_object = image::open(path)?;
+        let (image_width, image_height) = (image_object.width(), image_object.height());
+        let image_data = image_object.to_rgba8().into_raw();
+
+        let image_size = (std::mem::size_of::<u8>() as u32 * image_width * image_height * 4) as u64;
+
+        // Create Staging buffer
+        let staging_buffer = unsafe {
+            device.create_buffer(
+                &vk::BufferCreateInfo::builder()
+                    .size(image_size)
+                    .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+                None,
+            )?
+        };
+        let staging_buffer_requirements =
+            unsafe { device.get_buffer_memory_requirements(staging_buffer) };
+        let staging_buffer_allocation = allocator.allocate(&AllocationCreateDesc {
+            name: "User Texture Staging Buffer",
+            requirements: staging_buffer_requirements,
+            location: gpu_allocator::MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        unsafe {
+            device.bind_buffer_memory(
+                staging_buffer,
+                staging_buffer_allocation.memory(),
+                staging_buffer_allocation.offset(),
+            )?
+        }
+        // Map staging buffer
+        unsafe {
+            let mapped_memory = staging_buffer_allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+            mapped_memory.copy_from_nonoverlapping(image_data.as_ptr(), image_data.len());
+        }
+
+        let format = vk::Format::R8G8B8A8_UNORM;
+
+        // Create Image
+        let image = unsafe {
+            device.create_image(
+                &vk::ImageCreateInfo::builder()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: image_width,
+                        height: image_height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED)
+                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED),
+                None,
+            )?
+        };
+        let image_requirements = unsafe { device.get_image_memory_requirements(image) };
+        let image_allocation = allocator.allocate(&AllocationCreateDesc {
+            name: "User Texture Image",
+            requirements: image_requirements,
+            location: gpu_allocator::MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        unsafe {
+            device.bind_image_memory(image, image_allocation.memory(), image_allocation.offset())?
+        };
+
+        // Copy data from buffer to image
+        unsafe {
+            let command = device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::builder()
+                    .command_pool(graphics_command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?[0];
+
+            // Begin command
+            device.begin_command_buffer(
+                command,
+                &vk::CommandBufferBeginInfo::builder()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+
+            // Change image layout to transfer dst optimal
+            device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .image(image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::builder()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1)
+                            .build(),
+                    )
+                    .build()],
+            );
+
+            // Copy data from buffer to image
+            device.cmd_copy_buffer_to_image(
+                command,
+                staging_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::BufferImageCopy::builder()
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::builder()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(0)
+                            .base_array_layer(0)
+                            .layer_count(1)
+                            .build(),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: image_width,
+                        height: image_height,
+                        depth: 1,
+                    })
+                    .buffer_offset(0)
+                    .buffer_image_height(0)
+                    .buffer_row_length(0)
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .build()],
+            );
+
+            // Change image layout to shader read only optimal
+            device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::builder()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1)
+                            .build(),
+                    )
+                    .build()],
+            );
+
+            // End command
+            device.end_command_buffer(command)?;
+
+            // Submit command
+            device.queue_submit(
+                graphics_queue,
+                &[vk::SubmitInfo::builder()
+                    .command_buffers(&[command])
+                    .build()],
+                vk::Fence::null(),
+            )?;
+            device.queue_wait_idle(graphics_queue)?;
+        }
+
+        // Delete staging buffer
+        allocator.free(staging_buffer_allocation)?;
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+        }
+
+        // Create Image View
+        let image_view = unsafe {
+            device.create_image_view(
+                &vk::ImageViewCreateInfo::builder()
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .image(image)
+                    .format(format)
+                    .components(vk::ComponentMapping {
+                        r: vk::ComponentSwizzle::IDENTITY,
+                        g: vk::ComponentSwizzle::IDENTITY,
+                        b: vk::ComponentSwizzle::IDENTITY,
+                        a: vk::ComponentSwizzle::IDENTITY,
+                    })
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )?
+        };
+
+        (image, image_allocation, image_view)
+    };
+    Ok((image, image_allocation, image_view))
 }
 impl Drop for App {
     fn drop(&mut self) {
