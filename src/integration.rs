@@ -28,6 +28,7 @@ struct DescriptorPoolInfo {
 #[derive(Copy, Clone, Debug)]
 struct DescriptorSetAllocation {
     set: vk::DescriptorSet,
+    layout: vk::DescriptorSetLayout,
     pool_index: usize,
 }
 
@@ -64,6 +65,8 @@ pub struct Integration<A: AllocatorTrait> {
 
     user_texture_layout: vk::DescriptorSetLayout,
     user_textures: Vec<Option<DescriptorSetAllocation>>,
+
+    reusable_descriptor_sets: Vec<DescriptorSetAllocation>,
 }
 impl<A: AllocatorTrait> Integration<A> {
     /// Create an instance of the integration.
@@ -500,6 +503,8 @@ impl<A: AllocatorTrait> Integration<A> {
 
             user_texture_layout,
             user_textures,
+
+            reusable_descriptor_sets: vec![],
         }
     }
 
@@ -790,7 +795,10 @@ impl<A: AllocatorTrait> Integration<A> {
         }
 
         for &id in &textures_delta.free {
-            self.texture_desc_sets.remove_entry(&id); // dsc_set is destroyed with dsc_pool
+            if let Some((id, set)) = self.texture_desc_sets.remove_entry(&id) {
+                info!("Texture {id:?} has been freed, attempting to reuse it's descriptor set");
+                self.reusable_descriptor_sets.push(set);
+            }
             self.texture_image_infos.remove_entry(&id);
             if let Some((_, image)) = self.texture_images.remove_entry(&id) {
                 unsafe {
@@ -1186,8 +1194,7 @@ impl<A: AllocatorTrait> Integration<A> {
             // Otherwise save the newly created texture
 
             // update dsc set
-            let layouts = [self.descriptor_set_layouts[0]];
-            let dsc_set = self.get_descriptor_set(&layouts);
+            let dsc_set = self.get_descriptor_set(self.descriptor_set_layouts[0]);
             let image_info = vk::DescriptorImageInfo::builder()
                 .image_view(texture_image_view)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1516,8 +1523,7 @@ impl<A: AllocatorTrait> Integration<A> {
         };
 
         // allocate and update descriptor set
-        let layouts = [self.user_texture_layout];
-        let descriptor_set = self.get_descriptor_set(&layouts);
+        let descriptor_set = self.get_descriptor_set(self.user_texture_layout);
         unsafe {
             self.device.update_descriptor_sets(
                 &[vk::WriteDescriptorSet::builder()
@@ -1548,22 +1554,11 @@ impl<A: AllocatorTrait> Integration<A> {
     /// The internal texture (egui::TextureId::Egui) cannot be unregistered.
     pub fn unregister_user_texture(&mut self, texture_id: egui::TextureId) {
         if let egui::TextureId::User(id) = texture_id {
-            if let Some(descriptor_set) = self.user_textures[id as usize] {
-                let pool_info = &mut self.descriptor_pools[descriptor_set.pool_index];
-                unsafe {
-                    self.device
-                        .free_descriptor_sets(pool_info.pool, &[descriptor_set.set])
-                        .expect("Failed to free descriptor sets.");
-                }
-                pool_info.current_allocations -= 1;
-
+            if let Some(descriptor_set) = self.user_textures[id as usize].take() {
+                self.reusable_descriptor_sets.push(descriptor_set);
                 info!(
-                    "Deallocated set from pool {}, it now holds {}/{} allocations",
-                    descriptor_set.pool_index,
-                    pool_info.current_allocations,
-                    pool_info.max_allocations
+                    "User texture {id:?} has been unregistered, storing it's descriptor set to reuse it",
                 );
-                self.user_textures[id as usize] = None;
             }
         } else {
             error!("The internal texture cannot be unregistered; please pass the texture ID of UserTexture.");
@@ -1670,12 +1665,24 @@ impl<A: AllocatorTrait> Integration<A> {
         pool_idx
     }
 
-    fn get_descriptor_set(
-        &mut self,
-        layouts: &[vk::DescriptorSetLayout],
-    ) -> DescriptorSetAllocation {
+    fn get_descriptor_set(&mut self, layout: vk::DescriptorSetLayout) -> DescriptorSetAllocation {
+        if let Some((reusable_index, _)) = self
+            .reusable_descriptor_sets
+            .iter()
+            .enumerate()
+            .find(|(_, allocation)| allocation.layout == layout)
+        {
+            let set = self.reusable_descriptor_sets.remove(reusable_index);
+            info!(
+                "Found a reusable descriptor set from pool {}",
+                set.pool_index
+            );
+            return set;
+        }
+
         let pool_index = self.get_descriptor_pool_index();
         let pool_info = &mut self.descriptor_pools[pool_index];
+        let layouts = &[layout];
         let set = {
             let dsc_alloc_info = vk::DescriptorSetAllocateInfo::builder()
                 .descriptor_pool(pool_info.pool)
@@ -1695,6 +1702,10 @@ impl<A: AllocatorTrait> Integration<A> {
             pool_index, pool_info.current_allocations, pool_info.max_allocations
         );
 
-        DescriptorSetAllocation { set, pool_index }
+        DescriptorSetAllocation {
+            set,
+            layout,
+            pool_index,
+        }
     }
 }
