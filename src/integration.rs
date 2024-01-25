@@ -14,6 +14,8 @@ use egui_winit::{winit::window::Window, EventResponse};
 use raw_window_handle::HasRawDisplayHandle;
 use std::ffi::CString;
 
+use log::{debug, error, info};
+
 use crate::{utils::insert_image_memory_barrier, *};
 
 #[derive(Copy, Clone, Debug)]
@@ -94,6 +96,7 @@ impl<A: AllocatorTrait> Integration<A> {
                 .get_swapchain_images(swapchain)
                 .expect("Failed to get swapchain images.")
         };
+        debug!("Using {} swap images", swap_images.len());
 
         // Create DescriptorSetLayouts
         let descriptor_set_layouts = {
@@ -462,6 +465,8 @@ impl<A: AllocatorTrait> Integration<A> {
         }
         .expect("Failed to create descriptor set layout.");
         let user_textures = vec![];
+
+        info!("Initialization complete");
 
         Self {
             physical_width,
@@ -1544,17 +1549,24 @@ impl<A: AllocatorTrait> Integration<A> {
     pub fn unregister_user_texture(&mut self, texture_id: egui::TextureId) {
         if let egui::TextureId::User(id) = texture_id {
             if let Some(descriptor_set) = self.user_textures[id as usize] {
-                let pool = &mut self.descriptor_pools[descriptor_set.pool_index];
+                let pool_info = &mut self.descriptor_pools[descriptor_set.pool_index];
                 unsafe {
                     self.device
-                        .free_descriptor_sets(pool.pool, &[descriptor_set.set])
+                        .free_descriptor_sets(pool_info.pool, &[descriptor_set.set])
                         .expect("Failed to free descriptor sets.");
                 }
-                pool.current_allocations -= 1;
+                pool_info.current_allocations -= 1;
+
+                info!(
+                    "Deallocated set from pool {}, it now holds {}/{} allocations",
+                    descriptor_set.pool_index,
+                    pool_info.current_allocations,
+                    pool_info.max_allocations
+                );
                 self.user_textures[id as usize] = None;
             }
         } else {
-            eprintln!("The internal texture cannot be unregistered; please pass the texture ID of UserTexture.");
+            error!("The internal texture cannot be unregistered; please pass the texture ID of UserTexture.");
             return;
         }
     }
@@ -1645,7 +1657,7 @@ impl<A: AllocatorTrait> Integration<A> {
         }
         .expect("Failed to create descriptor pool.");
 
-        println!("Create new pool");
+        info!("Create new pool");
 
         let info = DescriptorPoolInfo {
             pool,
@@ -1677,6 +1689,11 @@ impl<A: AllocatorTrait> Integration<A> {
         };
 
         pool_info.current_allocations += 1;
+
+        info!(
+            "Created new set from pool {}, it now holds {}/{} allocations",
+            pool_index, pool_info.current_allocations, pool_info.max_allocations
+        );
 
         DescriptorSetAllocation { set, pool_index }
     }

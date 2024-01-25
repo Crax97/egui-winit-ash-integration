@@ -1827,6 +1827,7 @@ impl Drop for App {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
     let event_loop = EventLoop::new();
     let mut app = App::new(&event_loop)?;
     event_loop.run(move |event, _, control_flow| {
